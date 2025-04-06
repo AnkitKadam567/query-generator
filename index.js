@@ -1,22 +1,53 @@
-<!-- File: resources/icon.svg -->
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <defs>
-    <linearGradient id="angularGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#DD0031" />
-      <stop offset="100%" style="stop-color:#C3002F" />
-    </linearGradient>
-    <linearGradient id="reactGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#61DAFB" />
-      <stop offset="100%" style="stop-color:#61DAFB" />
-    </linearGradient>
-  </defs>
-  
-  <!-- Angular Logo (Left Side) -->
-  <path d="M4,2 L1,5 L1,11 L4,14 L4,2" fill="url(#angularGradient)" />
-  
-  <!-- React Logo (Right Side) -->
-  <path d="M12,2 L15,5 L15,11 L12,14 L12,2" fill="url(#reactGradient)" />
-  
-  <!-- Arrow in the middle -->
-  <path d="M6,8 L10,8 M10,6 L10,10 M10,8 L12,8" stroke="#ffffff" stroke-width="1" fill="none" />
-</svg>
+{
+  "name": "angular-to-react-converter",
+  "displayName": "Angular to React Converter",
+  "description": "Convert Angular code to React using OpenAI",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "angular-to-react.convert",
+        "title": "Convert Angular to React"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "angular-to-react-sidebar",
+          "title": "Angular to React",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "angular-to-react-sidebar": [
+        {
+          "id": "angular-to-react-sidebar-view",
+          "name": "Converter",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "pretest": "npm run lint",
+    "test": "node ./test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.60.0",
+    "eslint": "^8.18.0",
+    "glob": "^8.0.3",
+    "mocha": "^10.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.8.4"
+  }
+}
