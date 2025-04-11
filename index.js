@@ -1,846 +1,690 @@
-// angularjs-to-react-converter/src/index.ts
-import { writeOutputFiles } from './writer';
-import path from 'path';
-import fs from 'fs';
+const vscode = require('vscode');
+const path = require('path');
+const fs = require('fs');
+const axios = require('axios');
 
-// Hardcoded paths for the project
-const ANGULARJS_PROJECT_PATH = './angularjs-project';
-const REACT_OUTPUT_PATH = './react-app';
+// Store credentials and paths securely
+let apiToken = undefined;
+let sourcePath = undefined;
+let destinationPath = undefined;
 
-async function main() {
-  try {c
-    console.log('Starting AngularJS to React conversion process...');
-    
-    // Step 1: Scan AngularJS project and classify files
-    console.log('Scanning AngularJS project...');
-    const files = await scanAngularJSProject(ANGULARJS_PROJECT_PATH);
-    console.log(`Found ${files.length} files to process`);
-    
-    // Step 2: Group related files
-    console.log('Grouping and categorizing files...');
-    const groupedFiles = groupAngularJSFiles(files);
-    
-    // Ensure output directory exists
-    if (!fs.existsSync(REACT_OUTPUT_PATH)) {
-      fs.mkdirSync(REACT_OUTPUT_PATH, { recursive: true });
-    }
-    
-    // Step 3: Convert controllers to React components
-    console.log('Converting controllers to React components...');
-    const convertedControllers = await convertControllers(groupedFiles.controllers);
-    
-    // Step 4: Convert directives to React components
-    console.log('Converting directives to React components...');
-    const convertedDirectives = await convertDirectives(groupedFiles.directives);
-    
-    // Step 5: Convert services to JS modules or React Context
-    console.log('Converting services...');
-    const convertedServices = await convertServices(groupedFiles.services);
-    
-    // Step 6: Convert filters to JS functions
-    console.log('Converting filters...');
-    const convertedFilters = await convertFilters(groupedFiles.filters);
-    
-    // Step 7: Generate React Router structure from ngRoute or ui-router
-    console.log('Generating React Router structure...');
-    const routerConfig = await generateReactRouter(groupedFiles.routeConfigs);
-    
-    // Step 8: Output all converted files
-    console.log('Writing output files...');
-    await writeOutputFiles({
-      components: [...convertedControllers, ...convertedDirectives],
-      services: convertedServices,
-      filters: convertedFilters,
-      router: routerConfig
-    }, REACT_OUTPUT_PATH);
-    
-    console.log('Conversion completed successfully!');
-  } catch (error) {
-    console.error('Conversion failed:', error);
-    process.exit(1);
-  }
-}
+/**
+ * @param {vscode.ExtensionContext} context
+ */
+function activate(context) {
+  console.log('Angular to React Converter is now active');
 
-main();
-
-// scanner.ts
-import fs from 'fs';
-import path from 'path';
-import { promisify } from 'util';
-
-const readdir = promisify(fs.readdir);
-const stat = promisify(fs.stat);
-
-export interface AngularJSFile {
-  path: string;
-  type: 'controller' | 'directive' | 'service' | 'filter' | 'config' | 'route' | 'html' | 'js' | 'css' | 'unknown';
-  content?: string;
-  moduleName?: string;
-}
-
-export async function scanAngularJSProject(projectPath: string): Promise<AngularJSFile[]> {
-  const files: AngularJSFile[] = [];
+  // Create sidebar webview provider
+  const provider = new AngularToReactViewProvider(context.extensionUri);
   
-  async function scanDirectory(dirPath: string) {
-    const entries = await readdir(dirPath, { withFileTypes: true });
-    
-    for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry.name);
-      
-      if (entry.isDirectory()) {
-        if (!entry.name.startsWith('node_modules') && !entry.name.startsWith('.')) {
-          await scanDirectory(fullPath);
-        }
-      } else {
-        if (entry.name.endsWith('.js') || entry.name.endsWith('.html') || 
-            entry.name.endsWith('.css') || entry.name.endsWith('.less') || 
-            entry.name.endsWith('.scss')) {
-          
-          const content = fs.readFileSync(fullPath, 'utf-8');
-          const fileType = classifyAngularJSFile(fullPath, content);
-          
-          files.push({
-            path: fullPath,
-            type: fileType,
-            content: content,
-            moduleName: extractModuleName(content, fileType)
-          });
-        }
+  // Register the sidebar view
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('angular-to-react-sidebar-view', provider)
+  );
+
+  // Register the command to start conversion
+  const disposable = vscode.commands.registerCommand('angular-to-react.convert', async () => {
+    if (!apiToken) {
+      vscode.window.showErrorMessage('Please generate an API token in the Angular to React sidebar first.');
+      return;
+    }
+
+    if (!sourcePath) {
+      sourcePath = await selectFolderPath('Select source directory containing Angular files');
+      if (!sourcePath) return; // User cancelled selection
+    }
+
+    if (!destinationPath) {
+      destinationPath = await selectFolderPath('Select destination directory for React files');
+      if (!destinationPath) return; // User cancelled selection
+    }
+
+    try {
+      await convertAngularToReact(sourcePath, destinationPath);
+      vscode.window.showInformationMessage('Angular to React conversion completed!');
+    } catch (error) {
+      vscode.window.showErrorMessage(`Conversion failed: ${error.message || 'Unknown error'}`);
+    }
+  });
+
+  // Register the command to select source path
+  context.subscriptions.push(
+    vscode.commands.registerCommand('angular-to-react.selectSourcePath', async () => {
+      sourcePath = await selectFolderPath('Select source directory containing Angular files');
+      if (sourcePath) {
+        provider.updateSourcePath(sourcePath);
       }
-    }
-  }
-  
-  await scanDirectory(projectPath);
-  return files;
+    })
+  );
+
+  // Register the command to select destination path
+  context.subscriptions.push(
+    vscode.commands.registerCommand('angular-to-react.selectDestinationPath', async () => {
+      destinationPath = await selectFolderPath('Select destination directory for React files');
+      if (destinationPath) {
+        provider.updateDestinationPath(destinationPath);
+      }
+    })
+  );
+
+  context.subscriptions.push(disposable);
 }
 
-function classifyAngularJSFile(filePath: string, content: string): AngularJSFile['type'] {
-  const fileName = path.basename(filePath).toLowerCase();
-  
-  if (filePath.endsWith('.html')) return 'html';
-  if (filePath.endsWith('.css') || filePath.endsWith('.scss') || filePath.endsWith('.less')) return 'css';
-  
-  // For JavaScript files, try to determine the AngularJS type based on content
-  if (filePath.endsWith('.js')) {
-    // Check for controller
-    if (content.includes('.controller(') || 
-        content.includes('$controller') || 
-        fileName.includes('controller')) {
-      return 'controller';
-    }
-    
-    // Check for directive
-    if (content.includes('.directive(') || 
-        content.includes('$compile') || 
-        fileName.includes('directive')) {
-      return 'directive';
-    }
-    
-    // Check for service/factory/provider
-    if (content.includes('.service(') || 
-        content.includes('.factory(') || 
-        content.includes('.provider(') || 
-        fileName.includes('service') || 
-        fileName.includes('factory') || 
-        fileName.includes('provider')) {
-      return 'service';
-    }
-    
-    // Check for filter
-    if (content.includes('.filter(') || fileName.includes('filter')) {
-      return 'filter';
-    }
-    
-    // Check for config
-    if (content.includes('.config(')) {
-      return 'config';
-    }
-    
-    // Check for route config
-    if (content.includes('$routeProvider') || 
-        content.includes('$stateProvider') || 
-        fileName.includes('route') || 
-        fileName.includes('routes')) {
-      return 'route';
-    }
-    
-    // Default for JS files we can't specifically identify
-    return 'js';
-  }/
-  
-  return 'unknown';
-}
-
-function extractModuleName(content: string, fileType: AngularJSFile['type']): string | undefined {
-  // Try to extract the module name from angular.module(...) declaration
-  const moduleMatch = content.match(/angular\.module\(['"]([^'"]+)['"]/);
-  if (moduleMatch && moduleMatch[1]) {
-    return moduleMatch[1];
-  }
-  
-  return undefined;
-}
-
-
-
-export interface DirectiveGroup {
-  directive: AngularJSFile;
-  template?: AngularJSFile;
-  css?: AngularJSFile;
-  name?: string;
-}
-
-export interface ControllerGroup {
-  controller: AngularJSFile;
-  template?: AngularJSFile;t
-  css?: AngularJSFile;
-  name?: string;
-}
-
-export interface GroupedFiles {
-  controllers: ControllerGroup[];
-  directives: DirectiveGroup[];
-  services: AngularJSFile[];
-  filters: AngularJSFile[];
-  routeConfigs: AngularJSFile[];
-  configs: AngularJSFile[];
-  others: AngularJSFile[]
-}
-
-export function groupAngularJSFiles(files: AngularJSFile[]): GroupedFiles {
-  const result: GroupedFiles = {
-    controllers: [],
-    directives: [],
-    services: [],
-    filters: [],
-    routeConfigs: [],
-    configs: [],
-    others: []
+/**
+ * Helper function to prompt user to select a folder
+ * @param {string} title - Dialog title
+ * @returns {Promise<string|undefined>} - Selected folder path or undefined if cancelled
+ */
+async function selectFolderPath(title) {
+  const options = {
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: false,
+    openLabel: 'Select Folder',
+    title: title
   };
-  
-  // First, separate files by type
-  const controllers = files.filter(f => f.type === 'controller');
-  const directives = files.filter(f => f.type === 'directive');
-  const htmlFiles = files.filter(f => f.type === 'html');
-  const cssFiles = files.filter(f => f.type === 'css');
-  
-  // Add services, filters, and routes directly
-  result.services = files.filter(f => f.type === 'service');
-  result.filters = files.filter(f => f.type === 'filter');
-  result.routeConfigs = files.filter(f => f.type === 'route');
-  result.configs = files.filter(f => f.type === 'config');
-  
-  // Collect other files
-  result.others = files.filter(f => 
-    f.type !== 'controller' && 
-    f.type !== 'directive' && 
-    f.type !== 'service' && 
-    f.type !== 'filter' && 
-    f.type !== 'route' && 
-    f.type !== 'config' && 
-    f.type !== 'html' && 
-    f.type !== 'css'
-  );
-  
-  // Group controllers with their templates (based on naming conventions and content)
-  controllers.forEach(controller => {
-    const controllerName = extractNameFromAngularJSFile(controller);
-    const baseName = path.basename(controller.path, '.js');
-    const dirName = path.dirname(controller.path);
-    
-    // Look for associated template (by naming convention or references in the code)
-    let template: AngularJSFile | undefined;
-    let css: AngularJSFile | undefined;
-    
-    // Check for templateUrl in the controller file
-    const templateUrlMatch = controller.content?.match(/templateUrl\s*:\s*['"]([^'"]+)['"]/);
-    if (templateUrlMatch && templateUrlMatch[1]) {
-      const templatePath = templateUrlMatch[1];
-      template = htmlFiles.find(html => {
-        // Try to match the template URL to an actual file
-        const htmlBasePath = html.path.replace(ANGULARJS_PROJECT_PATH, '').replace(/^\//, '');
-        return htmlBasePath === templatePath || html.path.endsWith(templatePath);
-      });
-    }
-    
-    // If template not found by templateUrl, try naming convention
-    if (!template) {
-      // Try to find by naming convention (e.g., controller-name.html or views/controller-name.html)
-      template = htmlFiles.find(html => {
-        const htmlBaseName = path.basename(html.path, '.html');
-        return (
-          htmlBaseName === baseName || 
-          html.path.includes(`/${baseName}.html`) || 
-          html.path.includes(`/views/${baseName}.html`) ||
-          html.path.includes(`/templates/${baseName}.html`) ||
-          html.path.includes(`/partials/${baseName}.html`)
-        );
-      });
-    }
-    
-    // Look for associated CSS
-    css = cssFiles.find(cssFile => {
-      const cssBaseName = path.basename(cssFile.path, path.extname(cssFile.path));
-      return (
-        cssBaseName === baseName || 
-        cssFile.path.includes(`/${baseName}.css`) || 
-        cssFile.path.includes(`/${baseName}.scss`) || 
-        cssFile.path.includes(`/${baseName}.less`)
-      );
-    });
-    
-    result.controllers.push({
-      controller,
-      template,
-      css,
-      name: controllerName || baseName
-    });
-  });
-  
-  // Group directives with their templates
-  directives.forEach(directive => {
-    const directiveName = extractNameFromAngularJSFile(directive);
-    const baseName = path.basename(directive.path, '.js');
-    
-    // Look for template in the directive (could be inline or templateUrl)
-    let template: AngularJSFile | undefined;
-    let css: AngularJSFile | undefined;
-    
-    // Check for templateUrl in the directive file
-    const templateUrlMatch = directive.content?.match(/templateUrl\s*:\s*['"]([^'"]+)['"]/);
-    if (templateUrlMatch && templateUrlMatch[1]) {
-      const templatePath = templateUrlMatch[1];
-      template = htmlFiles.find(html => {
-        // Try to match the template URL to an actual file
-        const htmlBasePath = html.path.replace(ANGULARJS_PROJECT_PATH, '').replace(/^\//, '');
-        return htmlBasePath === templatePath || html.path.endsWith(templatePath);
-      });
-    }
-    
-    // If template not found by templateUrl, try naming convention
-    if (!template) {
-      template = htmlFiles.find(html => {
-        const htmlBaseName = path.basename(html.path, '.html');
-        return (
-          htmlBaseName === baseName || 
-          html.path.includes(`/${baseName}.html`) || 
-          html.path.includes(`/directives/${baseName}.html`) ||
-          html.path.includes(`/templates/${baseName}.html`)
-        );
-      });
-    }
-    
-    // Look for associated CSS
-    css = cssFiles.find(cssFile => {
-      const cssBaseName = path.basename(cssFile.path, path.extname(cssFile.path));
-      return (
-        cssBaseName === baseName || 
-        cssFile.path.includes(`/${baseName}.css`) || 
-        cssFile.path.includes(`/${baseName}.scss`) || 
-        cssFile.path.includes(`/${baseName}.less`)
-      );
-    });
-    
-    result.directives.push({
-      directive,
-      template,
-      css,
-      name: directiveName || baseName
-    });
-  });
-  
-  return result;
-}
 
-function extractNameFromAngularJSFile(file: AngularJSFile): string | undefined {
-  if (file.type === 'controller') {
-    // Try to extract controller name
-    const match = file.content?.match(/\.controller\(['"]([^'"]+)['"]/);
-    if (match && match[1]) {
-      return match[1];
-    }
-  } else if (file.type === 'directive') {
-    // Try to extract directive name
-    const match = file.content?.match(/\.directive\(['"]([^'"]+)['"]/);
-    if (match && match[1]) {
-      return match[1];
-    }
-  } else if (file.type === 'service') {
-    // Try to extract service name
-    const serviceMatch = file.content?.match(/\.service\(['"]([^'"]+)['"]/);
-    const factoryMatch = file.content?.match(/\.factory\(['"]([^'"]+)['"]/);
-    const providerMatch = file.content?.match(/\.provider\(['"]([^'"]+)['"]/);
-    
-    if (serviceMatch && serviceMatch[1]) return serviceMatch[1];
-    if (factoryMatch && factoryMatch[1]) return factoryMatch[1];
-    if (providerMatch && providerMatch[1]) return providerMatch[1];
-  } else if (file.type === 'filter') {
-    // Try to extract filter name
-    const match = file.content?.match(/\.filter\(['"]([^'"]+)['"]/);
-    if (match && match[1]) {
-      return match[1];
-    }
+  const folderUri = await vscode.window.showOpenDialog(options);
+  if (folderUri && folderUri.length > 0) {
+    return folderUri[0].fsPath;
   }
-  
   return undefined;
 }
 
-// converters/controller-converter.ts
-import { ControllerGroup } from '../grouper';
-import { Configuration, OpenAIApi } from 'openai';
-import path from 'path';
+class AngularToReactViewProvider {
+  /**
+   * @param {vscode.Uri} extensionUri
+   */
+  constructor(extensionUri) {
+    this._extensionUri = extensionUri;
+    this._view = undefined;
+  }
 
-// Initialize OpenAI API
-const configuration = new Configuration({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-const openai = new OpenAIApi(configuration);
-
-export interface ConvertedComponent {
-  name: string;
-  code: string;
-  originalPath: string;
-  outputPath: string;
-}
-
-export async function convertControllers(controllerGroups: ControllerGroup[]): Promise<ConvertedComponent[]> {
-  const convertedComponents: ConvertedComponent[] = [];
-  
-  for (const group of controllerGroups) {
-    console.log(`Converting controller: ${group.name || path.basename(group.controller.path)}`);
+  /**
+   * @param {vscode.WebviewView} webviewView
+   * @param {vscode.WebviewViewResolveContext} context
+   * @param {vscode.CancellationToken} _token
+   */
+  resolveWebviewView(webviewView, context, _token) {
+    this._view = webviewView;
     
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this._extensionUri]
+    };
+
+    webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+    // Handle messages from the webview
+    webviewView.webview.onDidReceiveMessage(message => {
+      switch (message.command) {
+        case 'generateToken':
+          this._generateToken(message.username, message.password);
+          break;
+        case 'selectSourcePath':
+          vscode.commands.executeCommand('angular-to-react.selectSourcePath');
+          break;
+        case 'selectDestinationPath':
+          vscode.commands.executeCommand('angular-to-react.selectDestinationPath');
+          break;
+        case 'startConversion':
+          vscode.commands.executeCommand('angular-to-react.convert');
+          break;
+        case 'error':
+          vscode.window.showErrorMessage(message.message);
+          break;
+      }
+    });
+  }
+
+  /**
+   * Generate API token from credentials
+   * @param {string} username - User's username
+   * @param {string} password - User's password
+   */
+  async _generateToken(username, password) {
+    if (!username || !password) {
+      this._sendMessage({ command: 'error', message: 'Username and password are required' });
+      return;
+    }
+
     try {
-      const controllerContent = group.controller.content || '';
-      const templateContent = group.template?.content || '';
-      const cssContent = group.css?.content || '';
-      
-      const prompt = `
-Convert this AngularJS (Angular 1.x) controller and template to a React functional component:
-
-AngularJS Controller:
-\`\`\`javascript
-${controllerContent}
-\`\`\`
-
-${templateContent ? `AngularJS Template:
-\`\`\`html
-${templateContent}
-\`\`\`` : 'No template found for this controller.'}
-
-${cssContent ? `CSS/SCSS:
-\`\`\`css
-${cssContent}
-\`\`\`` : 'No CSS found for this controller.'}
-
-Please convert this to a React functional component that:
-1. Uses React hooks instead of AngularJS controller patterns
-2. Replaces $scope with React state and props
-3. Converts AngularJS template syntax (ng-repeat, ng-if, ng-model, etc.) to JSX
-4. Handles any AngularJS directives appropriately
-5. Transforms AngularJS service dependencies (like $http) to appropriate React/JavaScript equivalents
-6. Uses modern React patterns and practices
-7. Manages CSS appropriately (as CSS modules or inline styles)
-8. Makes sure to handle any event bindings and two-way data binding
-`;
-
-      const response = await openai.createCompletion({
-        model: "gpt-4",
-        prompt: prompt,
-        max_tokens: 2048,
-        temperature: 0.2,
+      // Call the token generation API
+      const response = await axios.post('https://generate/token', {
+        username,
+        password
       });
 
-      const reactCode = response.data.choices[0].text?.trim() || '';
+      // Store the token
+      apiToken = response.data.token;
       
-      // Extract the actual component code from the response
-      const codeMatch = reactCode.match(/```(?:jsx|tsx)\s*([\s\S]*?)```/) || 
-                        reactCode.match(/```(?:javascript|typescript)\s*([\s\S]*?)```/);
+      // Notify the webview that token was generated successfully
+      this._sendMessage({ command: 'tokenGenerated', token: apiToken });
       
-      const cleanCode = codeMatch ? codeMatch[1] : reactCode;
-      
-      // Create output path based on original path
-      const controllerName = group.name || path.basename(group.controller.path, '.js');
-      const outputPath = `components/${controllerName}.jsx`;
-      
-      convertedComponents.push({
-        name: controllerName,
-        code: cleanCode,
-        originalPath: group.controller.path,
-        outputPath: outputPath
-      });
-      
+      vscode.window.showInformationMessage('API token generated successfully!');
     } catch (error) {
-      console.error(`Error converting controller ${group.name || group.controller.path}:`, error);
+      this._sendMessage({ 
+        command: 'error', 
+        message: `Failed to generate token: ${error.response?.data?.message || error.message}` 
+      });
     }
   }
-  
-  return convertedComponents;
-}
 
-// converters/directive-converter.ts
-import { DirectiveGroup } from '../grouper';
-import { OpenAIApi } from 'openai';
-import path from 'path';
-import { ConvertedComponent } from './controller-converter';
-
-export async function convertDirectives(directiveGroups: DirectiveGroup[]): Promise<ConvertedComponent[]> {
-  const convertedComponents: ConvertedComponent[] = [];
-  
-  for (const group of directiveGroups) {
-    console.log(`Converting directive: ${group.name || path.basename(group.directive.path)}`);
-    
-    try {
-      const directiveContent = group.directive.content || '';
-      const templateContent = group.template?.content || '';
-      const cssContent = group.css?.content || '';
-      
-      const prompt = `
-Convert this AngularJS (Angular 1.x) directive to a React component:
-
-AngularJS Directive:
-\`\`\`javascript
-${directiveContent}
-\`\`\`
-
-${templateContent ? `Directive Template:
-\`\`\`html
-${templateContent}
-\`\`\`` : 'No template found for this directive.'}
-
-${cssContent ? `CSS/SCSS:
-\`\`\`css
-${cssContent}
-\`\`\`` : 'No CSS found for this directive.'}
-
-Please convert this to a React component that:
-1. Uses React hooks or class components as appropriate
-2. Properly handles directive's scope/bindings as React props
-3. Converts the template to JSX
-4. Handles any directive-specific behavior (like link function, compile function)
-5. Transforms directive's lifecycle hooks to React lifecycle methods or hooks
-6. Uses modern React patterns and practices
-7. Manages CSS appropriately (as CSS modules or inline styles)
-8. Preserves the original functionality as much as possible
-`;
-
-      const openai = new OpenAIApi(configuration);
-      const response = await openai.createCompletion({
-        model: "gpt-4",
-        prompt: prompt,
-        max_tokens: 2048,
-        temperature: 0.2,
-      });
-
-      const reactCode = response.data.choices[0].text?.trim() || '';
-      
-      // Extract the actual component code from the response
-      const codeMatch = reactCode.match(/```(?:jsx|tsx)\s*([\s\S]*?)```/) || 
-                        reactCode.match(/```(?:javascript|typescript)\s*([\s\S]*?)```/);
-      
-      const cleanCode = codeMatch ? codeMatch[1] : reactCode;
-      
-      // Create output path based on original path
-      const directiveName = group.name || path.basename(group.directive.path, '.js');
-      // Convert directive name to PascalCase for React component
-      const componentName = directiveName.replace(/-([a-z])/g, (g) => g[1].toUpperCase());
-      const pascalCaseName = componentName.charAt(0).toUpperCase() + componentName.slice(1);
-      
-      const outputPath = `components/${pascalCaseName}.jsx`;
-      
-      convertedComponents.push({
-        name: pascalCaseName,
-        code: cleanCode,
-        originalPath: group.directive.path,
-        outputPath: outputPath
-      });
-      
-    } catch (error) {
-      console.error(`Error converting directive ${group.name || group.directive.path}:`, error);
+  /**
+   * Send a message to the webview
+   * @param {object} message - Message to send to the webview
+   */
+  _sendMessage(message) {
+    if (this._view) {
+      this._view.webview.postMessage(message);
     }
   }
-  
-  return convertedComponents;
-}
 
-// converters/service-converter.ts
-import { AngularJSFile } from '../scanner';
-import { OpenAIApi } from 'openai';
-import path from 'path';
-
-export interface ConvertedService {
-  name: string;
-  code: string;
-  originalPath: string;
-  outputPath: string;
-}
-
-export async function convertServices(services: AngularJSFile[]): Promise<ConvertedService[]> {
-  const convertedServices: ConvertedService[] = [];
-  
-  for (const service of services) {
-    console.log(`Converting service: ${path.basename(service.path)}`);
-    
-    try {
-      const content = service.content || '';
-      
-      // Determine if this is a service, factory, or provider
-      let serviceType = "service";
-      if (content.includes(".factory(")) {
-        serviceType = "factory";
-      } else if (content.includes(".provider(")) {
-        serviceType = "provider";
-      }
-      
-      const prompt = `
-Convert this AngularJS ${serviceType} to a React/JavaScript equivalent:
-
-AngularJS ${serviceType}:
-\`\`\`javascript
-${content}
-\`\`\`
-
-Please convert this to one of the following based on what makes the most sense:
-1. A JavaScript module with exported functions if it's mostly stateless
-2. A React Context provider if it manages state
-3. A custom React Hook if it provides UI-related functionality
-4. A class for complex stateful logic
-
-For AngularJS specific functionality:
-- Replace $http with fetch or axios
-- Replace $q promises with native JavaScript Promises
-- Replace $timeout with setTimeout
-- Replace $interval with setInterval
-- Handle AngularJS dependency injection by importing the required functionality
-
-Focus on preserving the functionality while using modern JavaScript/React patterns.
-`;
-
-      const openai = new OpenAIApi(configuration);
-      const response = await openai.createCompletion({
-        model: "gpt-4",
-        prompt: prompt,
-        max_tokens: 1500,
-        temperature: 0.2,
+  /**
+   * Update the source path in the webview
+   * @param {string} path - Selected source path
+   */
+  updateSourcePath(path) {
+    if (this._view) {
+      this._view.webview.postMessage({
+        command: 'updateSourcePath',
+        path: path
       });
+      sourcePath = path;
+    }
+  }
 
-      const jsCode = response.data.choices[0].text?.trim() || '';
+  /**
+   * Update the destination path in the webview
+   * @param {string} path - Selected destination path
+   */
+  updateDestinationPath(path) {
+    if (this._view) {
+      this._view.webview.postMessage({
+        command: 'updateDestinationPath',
+        path: path
+      });
+      destinationPath = path;
+    }
+  }
+
+  /**
+   * @param {vscode.Webview} webview
+   * @returns {string}
+   */
+  _getHtmlForWebview(webview) {
+    return `
+	<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Angular to React Converter</title>
+  <style>
+    body {
+      padding: 16px;
+      margin: 0 20px 0 0;
+      font-family: var(--vscode-font-family);
+      font-size: 14px;
+      color: var(--vscode-foreground);
+      background-color: var(--vscode-editor-background);
+    }
+
+    h3 {
+      margin-top: 0;
+      font-size: 1.2rem;
+      font-weight: bold;
+      color: var(--vscode-editor-foreground);
+      margin-bottom: 16px;
+    }
+
+    h4 {
+      margin: 12px 0 6px;
+      font-size: 1rem;
+      color: var(--vscode-editor-foreground);
+    }
+
+    p {
+      margin-bottom: 8px;
+    }
+
+    input[type="password"], input[type="text"] {
+      width: 100%;
+      padding: 8px 14px 8px 10px;
+      font-size: 13px;
+      background-color: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, #444);
+      border-radius: 4px;
+      outline: none;
+      margin-bottom: 10px;
+    }
+
+    input[type="password"]:focus, input[type="text"]:focus {
+      border-color: var(--vscode-focusBorder);
+    }
+
+    .path-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .path-input {
+      flex-grow: 1;
+    }
+
+    .browse-button {
+      background-color: var(--vscode-button-secondaryBackground, #3a3d41);
+      color: var(--vscode-button-secondaryForeground, #ffffff);
+      border: none;
+      padding: 8px 12px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .browse-button:hover {
+      background-color: var(--vscode-button-secondaryHoverBackground, #45494e);
+    }
+
+    .consent-group {
+      margin-top: 12px;
+      margin-bottom: 16px;
+    }
+
+    .consent {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    button {
+      background-color: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      padding: 8px 14px;
+      font-weight: bold;
+      font-size: 13px;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: background-color 0.2s ease-in-out;
+      margin-top: 6px;
+    }
+
+    button:hover {
+      background-color: var(--vscode-button-hoverBackground);
+    }
+    
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    
+    .path-label {
+      margin-top: 12px;
+      margin-bottom: 6px;
+      font-weight: bold;
+    }
+    
+    .section {
+      margin-bottom: 20px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    
+    .section:last-child {
+      border-bottom: none;
+    }
+    
+    .hidden {
+      display: none;
+    }
+    
+    .credentials-container {
+      margin-bottom: 14px;
+    }
+    
+    .token-container {
+      display: flex;
+      align-items: center;
+      margin-top: 10px;
+      padding: 8px 12px;
+      background-color: var(--vscode-editor-inactiveSelectionBackground);
+      border-radius: 4px;
+    }
+    
+    .token-text {
+      flex-grow: 1;
+      font-family: monospace;
+      word-break: break-all;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <h3>⚡ Angular to React Converter</h3>
+
+  <!-- Step 1: Credentials -->
+  <div id="credentialsSection" class="section">
+    <h4>Login Credentials</h4>
+    <div class="credentials-container">
+      <p>Username:</p>
+      <input type="text" id="usernameInput" placeholder="Enter username" />
       
-      // Extract code from the response
-      const codeMatch = jsCode.match(/```(?:jsx|tsx|javascript|typescript)\s*([\s\S]*?)```/);
-      const cleanCode = codeMatch ? codeMatch[1] : jsCode;
+      <p>Password:</p>
+      <input type="password" id="passwordInput" placeholder="Enter password" />
+    </div>
+    
+    <button id="generateTokenBtn">Generate API Token</button>
+    
+    <div id="tokenDisplay" class="token-container hidden">
+      <p class="token-text">Token generated successfully!</p>
+    </div>
+  </div>
+
+  <!-- Step 2: Permissions (initially hidden) -->
+  <div id="permissionsSection" class="section hidden">
+    <h4>Required Permissions</h4>
+    <div class="consent-group">
+      <div class="consent">
+        <input type="checkbox" id="readConsent" />
+        <label for="readConsent">Allow file read access</label>
+      </div>
+      <div class="consent">
+        <input type="checkbox" id="writeConsent" />
+        <label for="writeConsent">Allow file write access</label>
+      </div>
+    </div>
+    
+    <button id="permissionsConfirmBtn">Confirm Permissions</button>
+  </div>
+
+  <!-- Step 3: Path Selection (initially hidden) -->
+  <div id="pathsSection" class="section hidden">
+    <h4>Select Folders</h4>
+    <p class="path-label">Source folder (Angular files):</p>
+    <div class="path-row">
+      <input type="text" id="sourcePathInput" class="path-input" placeholder="Select source folder..." readonly />
+      <button class="browse-button" id="sourcePathButton">Browse</button>
+    </div>
+
+    <p class="path-label">Destination folder (React files):</p>
+    <div class="path-row">
+      <input type="text" id="destPathInput" class="path-input" placeholder="Select destination folder..." readonly />
+      <button class="browse-button" id="destPathButton">Browse</button>
+    </div>
+  </div>
+  
+  <!-- Step 4: Proceed Button (initially hidden) -->
+  <div id="proceedSection" class="section hidden">
+    <button id="proceedBtn" disabled>🚀 Start Conversion</button>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    let hasToken = false;
+    let permissionsGranted = false;
+    let sourceFolderSelected = false;
+    let destFolderSelected = false;
+
+    // Generate token button handler
+    document.getElementById('generateTokenBtn').addEventListener('click', () => {
+      const username = document.getElementById('usernameInput').value;
+      const password = document.getElementById('passwordInput').value;
       
-      // Extract service name from file or content
-      let serviceName = path.basename(service.path, '.js');
-      const nameMatch = content.match(/\.(service|factory|provider)\(['"]([^'"]+)['"]/);
-      if (nameMatch && nameMatch[2]) {
-        serviceName = nameMatch[2];
+      if (!username || !password) {
+        vscode.postMessage({ command: 'error', message: 'Username and password are required' });
+        return;
       }
       
-      // Determine if it's a context/hook or regular service
-      const isContextOrHook = 
-        cleanCode.includes('createContext') || 
-        cleanCode.includes('useContext') || 
-        cleanCode.includes('function use');
+      // Call the extension to generate token
+      vscode.postMessage({ 
+        command: 'generateToken', 
+        username: username,
+        password: password
+      });
+    });
+
+    // Permissions confirmation button handler
+    document.getElementById('permissionsConfirmBtn').addEventListener('click', () => {
+      const readConsent = document.getElementById('readConsent').checked;
+      const writeConsent = document.getElementById('writeConsent').checked;
       
-      // Create output path based on service type
-      let outputPath: string;
-      if (isContextOrHook) {
-        // If it's a context or hook, place in appropriate directory
-        outputPath = `hooks/${serviceName}.js`;
+      if (!readConsent || !writeConsent) {
+        vscode.postMessage({ 
+          command: 'error', 
+          message: 'Both read and write permissions are required' 
+        });
+        return;
+      }
+      
+      permissionsGranted = true;
+      document.getElementById('pathsSection').classList.remove('hidden');
+      document.getElementById('proceedSection').classList.remove('hidden');
+      checkProceedButtonState();
+    });
+
+    // Source path selection button handler
+    document.getElementById('sourcePathButton').addEventListener('click', () => {
+      vscode.postMessage({ command: 'selectSourcePath' });
+    });
+
+    // Destination path selection button handler
+    document.getElementById('destPathButton').addEventListener('click', () => {
+      vscode.postMessage({ command: 'selectDestinationPath' });
+    });
+
+    // Proceed button handler
+    document.getElementById('proceedBtn').addEventListener('click', () => {
+      vscode.postMessage({ command: 'startConversion' });
+    });
+
+    // Check if the proceed button should be enabled
+    function checkProceedButtonState() {
+      const proceedButton = document.getElementById('proceedBtn');
+      if (hasToken && permissionsGranted && sourceFolderSelected && destFolderSelected) {
+        proceedButton.disabled = false;
       } else {
-        // Otherwise, treat as a regular service
-        outputPath = `services/${serviceName}.js`;
+        proceedButton.disabled = true;
       }
-      
-      convertedServices.push({
-        name: serviceName,
-        code: cleanCode,
-        originalPath: service.path,
-        outputPath: outputPath
-      });
-      
-    } catch (error) {
-      console.error(`Error converting service ${service.path}:`, error);
     }
+
+    // Handle messages from extension
+    window.addEventListener('message', event => {
+      const message = event.data;
+      
+      switch (message.command) {
+        case 'tokenGenerated':
+          // Show token was generated and show next section
+          hasToken = true;
+          document.getElementById('tokenDisplay').classList.remove('hidden');
+          document.getElementById('permissionsSection').classList.remove('hidden');
+          checkProceedButtonState();
+          break;
+          
+        case 'updateSourcePath':
+          document.getElementById('sourcePathInput').value = message.path;
+          sourceFolderSelected = true;
+          checkProceedButtonState();
+          break;
+          
+        case 'updateDestinationPath':
+          document.getElementById('destPathInput').value = message.path;
+          destFolderSelected = true;
+          checkProceedButtonState();
+          break;
+          
+        case 'error':
+          // Handled by the extension
+          break;
+      }
+    });
+  </script>
+</body>
+</html>
+	`;
+  }
+}
+
+/**
+ * Converts Angular files to React in the workspace
+ * @param {string} sourcePath - Source directory containing Angular files
+ * @param {string} destinationPath - Destination directory for React files
+ */
+async function convertAngularToReact(sourcePath, destinationPath) {
+  // Find Angular files in the source path
+  const angularFiles = await findAngularFiles(sourcePath);
+  
+  if (angularFiles.length === 0) {
+    throw new Error('No Angular files found in the selected source folder');
   }
   
-  return convertedServices;
-}
-
-// converters/filter-converter.ts
-import { AngularJSFile } from '../scanner';
-import { OpenAIApi } from 'openai';
-import path from 'path';
-
-export interface ConvertedFilter {
-  name: string;
-  code: string;
-  originalPath: string;
-  outputPath: string;
-}
-
-export async function convertFilters(filters: AngularJSFile[]): Promise<ConvertedFilter[]> {
-  const convertedFilters: ConvertedFilter[] = [];
+  // Create destination directory if it doesn't exist
+  if (!fs.existsSync(destinationPath)) {
+    fs.mkdirSync(destinationPath, { recursive: true });
+  }
   
-  for (const filter of filters) {
-    console.log(`Converting filter: ${path.basename(filter.path)}`);
-    
+  // Process each file
+  for (const file of angularFiles) {
     try {
-      const content = filter.content || '';
-      
-      const prompt = `
-Convert this AngularJS filter to a JavaScript function:
-
-AngularJS Filter:
-\`\`\`javascript
-${content}
-\`\`\`
-
-Please convert this to:
-1. A pure JavaScript function that performs the same transformation
-2. Export it as a named export
-3. If it has dependencies, handle them appropriately in the JavaScript context
-4. Make sure it handles all the same use cases as the original filter
-`;
-
-      const openai = new OpenAIApi(configuration);
-      const response = await openai.createCompletion({
-        model: "gpt-4",
-        prompt: prompt,
-        max_tokens: 1000,
-        temperature: 0.2,
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `Converting ${path.basename(file)}`,
+        cancellable: true
+      }, async (progress, token) => {
+        const fileContent = fs.readFileSync(file, 'utf8');
+        const reactCode = await convertToReact(fileContent, file);
+        
+        // Create the appropriate directory structure in the destination folder
+        const relativePath = path.relative(sourcePath, file);
+        const reactFilePath = createReactFilePath(destinationPath, relativePath);
+        
+        // Ensure the directory exists
+        const reactFileDir = path.dirname(reactFilePath);
+        if (!fs.existsSync(reactFileDir)) {
+          fs.mkdirSync(reactFileDir, { recursive: true });
+        }
+        
+        // Write the converted React code to the destination file
+        fs.writeFileSync(reactFilePath, reactCode);
+        
+        progress.report({ increment: 100 });
       });
-
-      const jsCode = response.data.choices[0].text?.trim() || '';
-      
-      // Extract code from the response
-      const codeMatch = jsCode.match(/```(?:javascript|typescript)\s*([\s\S]*?)```/);
-      const cleanCode = codeMatch ? codeMatch[1] : jsCode;
-      
-      // Extract filter name
-      let filterName = path.basename(filter.path, '.js');
-      const nameMatch = content.match(/\.filter\(['"]([^'"]+)['"]/);
-      if (nameMatch && nameMatch[1]) {
-        filterName = nameMatch[1];
-      }
-      
-      // Create output path
-      const outputPath = `utils/filters/${filterName}.js`;
-      
-      convertedFilters.push({
-        name: filterName,
-        code: cleanCode,
-        originalPath: filter.path,
-        outputPath: outputPath
-      });
-      
     } catch (error) {
-      console.error(`Error converting filter ${filter.path}:`, error);
+      vscode.window.showWarningMessage(`Failed to convert ${file}: ${error.message || 'Unknown error'}`);
+    }
+  }
+}
+
+/**
+ * Find Angular files in the workspace
+ * @param {string} rootPath - Root path to search in
+ * @returns {Promise<string[]>} - Array of file paths
+ */
+async function findAngularFiles(rootPath) {
+  const angularFiles = [];
+  
+  // Find .ts/.html files that might be Angular components
+  const tsFilesPattern = new vscode.RelativePattern(rootPath, '**/*.ts');
+  const htmlFilesPattern = new vscode.RelativePattern(rootPath, '**/*.html');
+  
+  const tsFiles = await vscode.workspace.findFiles(tsFilesPattern, '**/node_modules/**');
+  const htmlFiles = await vscode.workspace.findFiles(htmlFilesPattern, '**/node_modules/**');
+  
+  // Filter for Angular component files
+  for (const file of tsFiles) {
+    const content = fs.readFileSync(file.fsPath, 'utf8');
+    if (content.includes('@Component') || content.includes('@NgModule') || content.includes('@Injectable')) {
+      angularFiles.push(file.fsPath);
     }
   }
   
-  return convertedFilters;
-}
-
-// converters/router-converter.ts
-import { AngularJSFile } from '../scanner';
-import { OpenAIApi } from 'openai';
-
-export interface RouterConfig {
-  code: string;
-  imports: string[];
-}
-
-export async function generateReactRouter(routeConfigs: AngularJSFile[]): Promise<RouterConfig> {
-  console.log('Generating React Router configuration...');
-  
-  if (routeConfigs.length === 0) {
-    console.log('No route configurations found, creating basic router setup');
-    return {
-      code: `
-import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-
-// You'll need to import your page components here
-// import HomePage from './components/HomePage';
-// import AboutPage from './components/AboutPage';
-
-function AppRouter() {
-  return (
-    <BrowserRouter>
-      <Routes>
-        {/* Add your routes here based on your AngularJS routes */}
-        <Route path="/" element={<div>Home Page</div>} />
-        <Route path="/about" element={<div>About Page</div>} />
-      </Routes>
-    </BrowserRouter>
-  );
-}
-
-export default AppRouter;
-`,
-      imports: ['react-router-dom']
-    };
+  // Add template files
+  for (const file of htmlFiles) {
+    const content = fs.readFileSync(file.fsPath, 'utf8');
+    if (content.includes('*ngIf') || content.includes('*ngFor') || content.includes('[(ngModel)]')) {
+      angularFiles.push(file.fsPath);
+    }
   }
   
-  // Combine all route configurations for analysis
-  let combinedRouteConfig = '';
-  
-  for (const config of routeConfigs) {
-    combinedRouteConfig += config.content + '\n\n';
-  }
-  
-  // Determine if the app uses ngRoute or ui-router
-  const routingType = combinedRouteConfig.includes('$stateProvider') ? 'ui-router' : 'ngRoute';
-  
-  const prompt = `
-Convert this AngularJS routing configuration (using ${routingType}) to React Router v6:
+  return angularFiles;
+}
 
-AngularJS Routes:
-\`\`\`javascript
-${combinedRouteConfig}
-\`\`\`
-
-Please:
-1. Create a React component that sets up React Router v6
-2. Convert all AngularJS routes to equivalent React Router routes
-3. Handle any nested routes or states (for ui-router)
-4. Handle route parameters
-5. If there are resolve properties, suggest how to handle data fetching
-6. Map any URL parameters
-7. Handle any route authentication logic
-
-The output should be a clean React Router v6 configuration that preserves the original routing structure.
-`;
-
+/**
+ * Convert Angular code to React using OpenAI API
+ * @param {string} content - File content
+ * @param {string} filePath - File path
+ * @returns {Promise<string>} - Converted React code
+ */
+async function convertToReact(content, filePath) {
   try {
-    const openai = new OpenAIApi(configuration);
-    const response = await openai.createCompletion({
-      model: "gpt-4",
-      prompt: prompt,
-      max_tokens: 1500,
-      temperature: 0.2,
-    });
-
-    const routerCode = response.data.choices[0].text?.trim() || '';
+    // Call OpenAI API to convert the code
+    const extension = path.extname(filePath);
+    const fileType = extension === '.ts' ? 'TypeScript' : extension === '.html' ? 'HTML' : 'Unknown';
     
-    // Extract code from the response
-    const codeMatch = routerCode.match(/```(?:jsx|tsx|javascript|typescript)\s*([\s\S]*?)```/);
-    const cleanCode = codeMatch ? codeMatch[1] : routerCode;
-    
-    // Extract imports from the generated code
-    const importLines = cleanCode.match(/import.*?from\s+['"].*?['"]/g) || [];
-    const imports: string[] = [];
-    
-    importLines.forEach(line => {
-      const match = line.match(/from\s+['"](.+?)['"]/);
-      if (match && match[1] && !match[1].startsWith('.')) {
-        imports.push(match[1]);
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: "gpt-4-turbo",
+        messages: [
+          {
+            role: "system",
+            content: "You are a code conversion assistant that specializes in converting Angular code to React. Provide only the converted code without explanations."
+          },
+          {
+            role: "user",
+            content: `Convert this Angular ${fileType} code to React:\n\n${content}`
+          }
+        ]
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${apiToken}`, // Using the generated token instead of OpenAI key
+          'Content-Type': 'application/json'
+        }
       }
-    });
+    );
     
-    return {
-      code: cleanCode,
-      imports: [...new Set(imports)] // Remove duplicates
-    };
+    return response.data.choices[0].message.content.trim();
+  } catch (error) {
+    if (error.response) {
+      throw new Error(`API error: ${error.response.data.error?.message || error.message}`);
+    }
+    throw error;
   }
+}
+
+/**
+ * Create file path for the React version of an Angular file
+ * @param {string} destRoot - Destination root directory
+ * @param {string} relativePath - Relative path from source root
+ * @returns {string} - React file path
+ */
+function createReactFilePath(destRoot, relativePath) {
+  const fileName = path.basename(relativePath, path.extname(relativePath));
+  const relativeDir = path.dirname(relativePath);
+  
+  // For .ts files, create .jsx files
+  if (path.extname(relativePath) === '.ts') {
+    return path.join(destRoot, relativeDir, `${fileName}.jsx`);
+  }
+  
+  // For .html files, create a separate .jsx file
+  if (path.extname(relativePath) === '.html') {
+    return path.join(destRoot, relativeDir, `${fileName}-view.jsx`);
+  }
+  
+  // Default case
+  return path.join(destRoot, relativeDir, `${fileName}.react${path.extname(relativePath)}`);
+}
+
+function deactivate() {}
+
+module.exports = {
+  activate,
+  deactivate
+};
